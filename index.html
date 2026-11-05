@@ -73,6 +73,8 @@ main{max-width:1200px;margin:0 auto;padding:2px var(--pad) 104px}
 .drag-clone{position:fixed!important;left:0;top:0;z-index:60;margin:0;pointer-events:none;will-change:transform}
 .drag-clone .cover{box-shadow:0 26px 50px -14px rgba(0,0,0,.42);transition:none}
 .drag-clone .meta{opacity:0}
+.card img{-webkit-user-drag:none;user-drag:none}
+body.dragging{-webkit-user-select:none;user-select:none;cursor:grabbing}
 
 .gen{position:absolute;inset:0;background:var(--c)}
 .gen::before{content:"";position:absolute;inset:0;
@@ -555,8 +557,9 @@ function flip(prev) {
   }
   if (!moved.length) return;
   void grid.offsetWidth;
-  moved.forEach(el => { el.style.transition = 'transform .5s cubic-bezier(.2,.8,.2,1)'; el.style.transform = ''; });
-  setTimeout(() => moved.forEach(el => { if (!el.style.transform) el.style.transition = ''; }), 560);
+  const dur = D && D.dragging ? 260 : 500, tok = {};
+  moved.forEach(el => { el._flip = tok; el.style.transition = `transform ${dur}ms cubic-bezier(.2,.8,.2,1)`; el.style.transform = ''; });
+  setTimeout(() => moved.forEach(el => { if (el._flip === tok) { el._flip = null; el.style.transition = ''; } }), dur + 60);
 }
 function render(mode) {
   const list = visible(), n = colCount();
@@ -641,10 +644,10 @@ let P = null, lastPT = 'touch', suppress = 0, lt = { id: null, t: 0, timer: 0 };
 function cancelP() { if (!P) return; clearTimeout(P.t); P.el.classList.remove('press'); P = null; }
 grid.addEventListener('pointerdown', e => {
   lastPT = e.pointerType;
-  if (e.button > 0) return;
+  if (e.button > 0 || D) return;
   const card = e.target.closest('.card'); if (!card) return;
   const more = !!e.target.closest('.more');
-  P = { el: card, id: card.dataset.id, x: e.clientX, y: e.clientY, pid: e.pointerId };
+  P = { el: card, id: card.dataset.id, x: e.clientX, y: e.clientY, pid: e.pointerId, type: e.pointerType, more };
   if (!more) card.classList.add('press');
   P.t = setTimeout(() => {
     if (!P) return;
@@ -652,21 +655,35 @@ grid.addEventListener('pointerdown', e => {
     p.el.classList.remove('press');
     suppress = performance.now(); vib(12);
     startLift(p);
-  }, 460);
+  }, 450);
 });
-grid.addEventListener('pointermove', e => { if (P && e.pointerId === P.pid && Math.hypot(e.clientX - P.x, e.clientY - P.y) > 10) cancelP(); });
+grid.addEventListener('pointermove', e => {
+  if (!P || e.pointerId !== P.pid) return;
+  const dist = Math.hypot(e.clientX - P.x, e.clientY - P.y);
+  // mouse / pen: drag straight away (no page-scroll conflict)
+  if (P.type !== 'touch' && !P.more && (e.buttons & 1) && dist > 6) {
+    const p = P; clearTimeout(p.t); P = null; p.el.classList.remove('press');
+    suppress = performance.now();
+    startLift(p); moveTo(e.clientX, e.clientY);
+    return;
+  }
+  // touch: moving before the hold completes = scrolling the page
+  if (dist > 10) cancelP();
+});
 grid.addEventListener('pointerup', e => { if (P && e.pointerId === P.pid) cancelP(); });
-grid.addEventListener('pointercancel', cancelP);
+grid.addEventListener('pointercancel', e => { if (P && e.pointerId === P.pid) cancelP(); });
 
-/* ---------- drag & drop reorder: long-press, then move ---------- */
+/* ---------- drag & drop reorder: long-press (touch) or press-and-move (mouse) ---------- */
 let D = null;
 function startLift(p) {
-  D = { id: p.id, el: p.el, pid: p.pid, x0: p.x, y0: p.y, x: p.x, y: p.y, dragging: false, lastSwap: 0, raf: 0 };
+  D = { id: p.id, el: p.el, pid: p.pid, type: p.type, x0: p.x, y0: p.y, x: p.x, y: p.y, dragging: false, lastSwap: 0, raf: 0 };
   p.el.classList.add('lift');
 }
 function beginDrag() {
-  const el = D.el, r = el.getBoundingClientRect();
+  if (!D || D.dragging) return;
+  const el = D.el;
   el.classList.remove('lift');
+  const r = el.getBoundingClientRect();
   D.offX = D.x0 - r.left; D.offY = D.y0 - r.top;
   const c = el.cloneNode(true);
   c.className = 'card drag-clone'; c.style.cssText = `width:${r.width}px`;
@@ -674,6 +691,7 @@ function beginDrag() {
   doc.body.appendChild(c);
   D.clone = c; D.dragging = true;
   el.classList.add('ghost');
+  doc.body.classList.add('dragging');
   placeClone();
   vib(8);
   D.raf = requestAnimationFrame(autoScroll);
@@ -682,16 +700,25 @@ function placeClone() {
   if (!D || !D.clone) return;
   D.clone.style.transform = `translate3d(${D.x - D.offX}px,${D.y - D.offY}px,0) scale(1.04) rotate(-1.2deg)`;
 }
+function moveTo(x, y) {
+  if (!D) return;
+  D.x = x; D.y = y;
+  if (!D.dragging) { if (Math.hypot(x - D.x0, y - D.y0) > 6) beginDrag(); else return; }
+  placeClone(); dragTarget();
+}
 function dragTarget() {
   if (!D || !D.dragging) return;
   const now = performance.now();
-  if (now - D.lastSwap < 260) return;
+  if (now - D.lastSwap < 280) return;
   const under = doc.elementFromPoint(D.x, D.y), card = under && under.closest && under.closest('.card');
-  if (!card || card === D.el || !grid.contains(card)) return;
+  if (!card || card === D.el || !grid.contains(card) || card._flip) return;   // ignore cards still sliding
+  const r = card.getBoundingClientRect();
+  const m = Math.min(24, r.height * .2);                                       // need to be well inside the target
+  if (D.y < r.top + m || D.y > r.bottom - m || D.x < r.left + 6 || D.x > r.right - 6) return;
   const list = visible();
   const from = list.findIndex(i => i.id === D.id), to = list.findIndex(i => i.id === card.dataset.id);
   if (from < 0 || to < 0 || from === to) return;
-  if (!!list[from].pinned !== !!list[to].pinned) return;          // pinned cards stay on top
+  if (!!list[from].pinned !== !!list[to].pinned) return;                       // pinned cards stay on top
   list.splice(to, 0, list.splice(from, 1)[0]);
   list.forEach((it, i) => { it.order = i; });
   D.lastSwap = now;
@@ -700,36 +727,44 @@ function dragTarget() {
 }
 function autoScroll() {
   if (!D || !D.dragging) return;
-  const edge = 80, y = D.y;
+  const edge = 90, y = D.y;
   let v = 0;
-  if (y < edge) v = -Math.ceil((edge - y) / edge * 16);
-  else if (y > innerHeight - edge) v = Math.ceil((y - (innerHeight - edge)) / edge * 16);
-  if (v) { scrollBy(0, v); dragTarget(); }
+  if (y < edge) v = -Math.ceil((edge - y) / edge * 18);
+  else if (y > innerHeight - edge) v = Math.ceil((y - (innerHeight - edge)) / edge * 18);
+  if (v) { const before = scrollY; scrollBy(0, v); if (scrollY !== before) dragTarget(); }
   D.raf = requestAnimationFrame(autoScroll);
 }
-function endDrag(cancelled) {
+function endDrag(openMenu) {
   if (!D) return;
   const d = D; D = null;
   cancelAnimationFrame(d.raf);
   suppress = performance.now();
   d.el.classList.remove('lift');
-  if (!d.dragging) { openActions(d.id); return; }
-  if (cancelled) render('flip');
+  doc.body.classList.remove('dragging');
+  if (!d.dragging) { if (openMenu) openActions(d.id); return; }
   save();
+  // land the floating card exactly on its final slot
+  d.el._flip = null; d.el.style.transition = 'none'; d.el.style.transform = '';
   const r = d.el.getBoundingClientRect(), c = d.clone;
   c.style.transition = 'transform .28s cubic-bezier(.2,.8,.2,1)';
   c.style.transform = `translate3d(${r.left}px,${r.top}px,0) scale(1) rotate(0deg)`;
-  setTimeout(() => { c.remove(); d.el.classList.remove('ghost'); }, 290);
+  setTimeout(() => { c.remove(); d.el.classList.remove('ghost'); d.el.style.transition = ''; }, 290);
 }
-doc.addEventListener('pointermove', e => {
-  if (!D || e.pointerId !== D.pid) return;
-  D.x = e.clientX; D.y = e.clientY;
-  if (!D.dragging) { if (Math.hypot(D.x - D.x0, D.y - D.y0) > 8) beginDrag(); else return; }
-  placeClone(); dragTarget();
-});
-doc.addEventListener('pointerup', e => { if (D && e.pointerId === D.pid) endDrag(false); });
-doc.addEventListener('pointercancel', e => { if (D && e.pointerId === D.pid) endDrag(true); });
-grid.addEventListener('touchmove', e => { if (D) e.preventDefault(); }, { passive: false });
+// Touch is driven by touch events: a document-level, non-passive listener keeps every touchmove cancelable,
+// so the page does not scroll (and the browser does not cancel the gesture) once a card is lifted.
+doc.addEventListener('touchmove', e => {
+  if (!D) return;
+  if (e.cancelable) e.preventDefault();
+  if (D.type === 'touch') { const t = e.touches[0]; if (t) moveTo(t.clientX, t.clientY); }
+}, { passive: false });
+doc.addEventListener('touchend', e => { if (D && D.type === 'touch' && !e.touches.length) endDrag(true); });
+doc.addEventListener('touchcancel', () => { if (D && D.type === 'touch') endDrag(false); });
+// Mouse / pen are driven by pointer events
+doc.addEventListener('pointermove', e => { if (D && D.type !== 'touch' && e.pointerId === D.pid) moveTo(e.clientX, e.clientY); });
+doc.addEventListener('pointerup', e => { if (D && e.pointerId === D.pid && D.type !== 'touch') endDrag(true); });
+doc.addEventListener('pointercancel', e => { if (D && e.pointerId === D.pid && D.type !== 'touch') endDrag(false); });
+addEventListener('blur', () => { if (D) endDrag(false); });
+doc.addEventListener('visibilitychange', () => { if (doc.hidden && D) endDrag(false); });
 grid.addEventListener('contextmenu', e => {
   const c = e.target.closest('.card'); if (!c) return;
   e.preventDefault();
