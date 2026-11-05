@@ -27,8 +27,8 @@
 }
 *,*::before,*::after{box-sizing:border-box}
 *{-webkit-tap-highlight-color:transparent}
-html{background:var(--bg);overscroll-behavior-y:contain;touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:100%}
-body{margin:0;min-height:100dvh;background:var(--bg);color:var(--text);font-family:var(--font);-webkit-font-smoothing:antialiased;overscroll-behavior-y:contain;transition:background-color .3s}
+html{background:var(--bg);height:100%;overflow:hidden;overscroll-behavior:none;touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{margin:0;height:100%;height:100dvh;overflow:hidden;overscroll-behavior:none;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:var(--font);-webkit-font-smoothing:antialiased;overscroll-behavior-y:contain;transition:background-color .3s}
 body.lock{overflow:hidden}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;cursor:pointer;-webkit-user-select:none;user-select:none}
 input{font:inherit;color:inherit}
@@ -38,7 +38,8 @@ button:focus-visible{outline:2px solid var(--text);outline-offset:2px}
 input:focus,input:focus-visible{outline:none}
 
 /* ---------- Brand banner ---------- */
-.brand{max-width:1200px;margin:0 auto;padding:10px var(--pad) 12px}
+.brand{position:relative;z-index:5;flex:none;width:100%;max-width:1200px;margin:0 auto;padding:10px var(--pad) 0}
+.brand::after{content:"";position:absolute;left:0;right:0;top:100%;height:12px;pointer-events:none;background:linear-gradient(to bottom,var(--bg),rgba(255,255,255,0))}
 .hero{position:relative;height:118px;border-radius:22px;overflow:hidden;isolation:isolate;transform:translateZ(0);
   background:linear-gradient(135deg,#252e5a,#12162f);box-shadow:0 16px 32px -20px rgba(22,28,72,.65);
   -webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
@@ -52,7 +53,8 @@ input:focus,input:focus-visible{outline:none}
 .by{font-size:11.5px;font-weight:400;letter-spacing:.03em;color:rgba(222,227,248,.62);white-space:nowrap;text-shadow:0 1px 6px rgba(10,13,32,.95),0 0 2px rgba(10,13,32,.8)}
 
 /* ---------- Grid ---------- */
-main{max-width:1200px;margin:0 auto;padding:2px var(--pad) 104px}
+main{flex:1 1 auto;min-height:0;width:100%;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:14px var(--pad) 104px}
+.grid,.empty{max-width:1184px;margin-left:auto;margin-right:auto}
 .grid{display:flex;align-items:flex-start;gap:var(--gap)}
 .grid[data-c="3"],.grid[data-c="4"],.grid[data-c="5"],.grid[data-c="6"]{--r:14px}
 .col{flex:1 1 0;min-width:0;display:flex;flex-direction:column}
@@ -421,7 +423,7 @@ const imgs = new Map();
 const nodes = new Map();
 
 /* ---------- elements ---------- */
-const grid = $('#grid'), emptyEl = $('#empty');
+const grid = $('#grid'), emptyEl = $('#empty'), scroller = $('#main');
 const fab = $('#fab'), scrim = $('#scrim'), act = $('#act'), ed = $('#ed'), toastEl = $('#toast');
 const fUrl = $('#fUrl'), fTitle = $('#fTitle'), fGroup = $('#fGroup'), fImgUrl = $('#fImgUrl'), pv = $('#pv');
 const gChips = $('#gChips'), swEl = $('#sw'), shpEl = $('#shp'), isrc = $('#isrc'), fileIn = $('#file');
@@ -729,9 +731,10 @@ function autoScroll() {
   if (!D || !D.dragging) return;
   const edge = 90, y = D.y;
   let v = 0;
-  if (y < edge) v = -Math.ceil((edge - y) / edge * 18);
-  else if (y > innerHeight - edge) v = Math.ceil((y - (innerHeight - edge)) / edge * 18);
-  if (v) { const before = scrollY; scrollBy(0, v); if (scrollY !== before) dragTarget(); }
+  const top = scroller.getBoundingClientRect().top + edge, bot = innerHeight - edge;
+  if (y < top) v = -Math.ceil(Math.min(1.5, (top - y) / edge) * 18);
+  else if (y > bot) v = Math.ceil(Math.min(1.5, (y - bot) / edge) * 18);
+  if (v) { const before = scroller.scrollTop; scroller.scrollTop += v; if (scroller.scrollTop !== before) dragTarget(); }
   D.raf = requestAnimationFrame(autoScroll);
 }
 function endDrag(openMenu) {
@@ -956,8 +959,8 @@ function commit() {
 }
 function reveal(id) {
   const el = nodes.get(id); if (!el || !el.isConnected) return;
-  const r = el.getBoundingClientRect(), hb = 12;
-  if (r.top < hb || r.bottom > innerHeight - 90) scrollTo({ top: Math.max(0, scrollY + r.top - hb), behavior: 'smooth' });
+  const r = el.getBoundingClientRect(), hb = scroller.getBoundingClientRect().top + 14;
+  if (r.top < hb || r.bottom > innerHeight - 90) { const top = scroller.scrollTop + r.top - hb; scroller.scrollTo({ top: top < 40 ? 0 : top, behavior: 'smooth' }); }
 }
 async function compress(f) {
   const url = URL.createObjectURL(f);
@@ -1043,7 +1046,7 @@ function makeNoise() {
 }
 
 /* ---------- scroll ---------- */
-addEventListener('scroll', () => { if (P) cancelP(); }, { passive: true });
+scroller.addEventListener('scroll', () => { if (P) cancelP(); }, { passive: true });
 
 /* ---------- hero banner animation (code rain + typing hacker) ---------- */
 const Hacker = (() => {
