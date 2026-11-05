@@ -67,6 +67,12 @@ main{max-width:1200px;margin:0 auto;padding:2px var(--pad) 104px}
 .card.in{animation:rise .55s var(--ease) both}
 .card.pop{animation:pop .5s var(--spring) both}
 .card.out{animation:out .24s ease forwards;pointer-events:none}
+.card.lift .cover{transform:scale(1.035);filter:none;box-shadow:0 18px 36px -14px rgba(0,0,0,.38);transition:transform .25s var(--spring),box-shadow .25s}
+.card.ghost{opacity:.3}
+.card.ghost .cover{transform:scale(.95);filter:saturate(.6)}
+.drag-clone{position:fixed!important;left:0;top:0;z-index:60;margin:0;pointer-events:none;will-change:transform}
+.drag-clone .cover{box-shadow:0 26px 50px -14px rgba(0,0,0,.42);transition:none}
+.drag-clone .meta{opacity:0}
 
 .gen{position:absolute;inset:0;background:var(--c)}
 .gen::before{content:"";position:absolute;inset:0;
@@ -408,7 +414,7 @@ const find = id => items.find(x => x.id === id);
 
 /* ---------- state ---------- */
 let items = [];
-const S = { sort: 'new', cols: 2, theme: 'light' };
+const S = { sort: 'manual', cols: 2, theme: 'light' };
 const imgs = new Map();
 const nodes = new Map();
 
@@ -440,6 +446,12 @@ function load() {
   try { raw = localStorage.getItem(K_ITEMS); } catch (e) {}
   if (raw == null) { items = seed(); save(); }
   else { try { const a = JSON.parse(raw); items = Array.isArray(a) ? a.filter(x => x && x.id && x.url) : []; } catch (e) { items = []; } }
+  // manual order for drag & drop (older data: keep the newest-first order it had)
+  if (items.some(x => typeof x.order !== 'number')) {
+    items.slice().sort((a, b) => (typeof a.order === 'number' ? a.order : -1e15) - (typeof b.order === 'number' ? b.order : -1e15) || (b.created || 0) - (a.created || 0))
+      .forEach((it, i) => { it.order = i; });
+    save();
+  }
 }
 function save() { try { localStorage.setItem(K_ITEMS, JSON.stringify(items)); return true; } catch (e) { toast('Bộ nhớ đã đầy'); return false; } }
 
@@ -478,7 +490,7 @@ function icoHTML(host, L) {
 function coverInner(it) {
   const host = hostOf(it.url), src = imgSrc(it), p = PAL[it.color] || PAL[0], h = hash(String(it.id));
   const L = esc(((titleOf(it) || host || '•').trim().charAt(0) || '•').toUpperCase());
-  const g = `<div class="gen${p.dk ? ' dk' : ''}" style="--c:${p.c};--c1:${p.c1};--c2:${p.c2};--ink:${p.ink};--hx:${12 + h % 30}%;--hy:${6 + (h >>> 6) % 26}%"><span class="fav">${icoHTML(host, L)}</span>${host ? `<span class="dom">${esc(host)}</span>` : ''}</div>`;
+  const g = `<div class="gen${p.dk ? ' dk' : ''}" style="--c:${p.c};--c1:${p.c1};--c2:${p.c2};--ink:${p.ink};--hx:${12 + h % 30}%;--hy:${6 + (h >>> 6) % 26}%"><span class="fav">${icoHTML(host, L)}</span></div>`;
   if (!src) return g;
   return g + `<img class="pic" alt="" draggable="false" decoding="async" loading="lazy" src="${esc(src)}" onload="this.classList.add('ok')" onerror="this.remove()"><span class="chip">${icoHTML(host, L)}</span>`;
 }
@@ -512,7 +524,8 @@ function visible() {
     new: byNew,
     old: (a, b) => (a.created || 0) - (b.created || 0),
     az: (a, b) => titleOf(a).localeCompare(titleOf(b), 'vi', { sensitivity: 'base' }),
-    hot: (a, b) => (b.opens || 0) - (a.opens || 0) || (b.lastOpen || 0) - (a.lastOpen || 0) || byNew(a, b)
+    hot: (a, b) => (b.opens || 0) - (a.opens || 0) || (b.lastOpen || 0) - (a.lastOpen || 0) || byNew(a, b),
+    manual: (a, b) => (a.order || 0) - (b.order || 0) || byNew(a, b)
   }[S.sort] || byNew;
   return list.slice().sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || by(a, b));
 }
@@ -638,12 +651,85 @@ grid.addEventListener('pointerdown', e => {
     const p = P; P = null;
     p.el.classList.remove('press');
     suppress = performance.now(); vib(12);
-    openActions(p.id);
+    startLift(p);
   }, 460);
 });
 grid.addEventListener('pointermove', e => { if (P && e.pointerId === P.pid && Math.hypot(e.clientX - P.x, e.clientY - P.y) > 10) cancelP(); });
 grid.addEventListener('pointerup', e => { if (P && e.pointerId === P.pid) cancelP(); });
 grid.addEventListener('pointercancel', cancelP);
+
+/* ---------- drag & drop reorder: long-press, then move ---------- */
+let D = null;
+function startLift(p) {
+  D = { id: p.id, el: p.el, pid: p.pid, x0: p.x, y0: p.y, x: p.x, y: p.y, dragging: false, lastSwap: 0, raf: 0 };
+  p.el.classList.add('lift');
+}
+function beginDrag() {
+  const el = D.el, r = el.getBoundingClientRect();
+  el.classList.remove('lift');
+  D.offX = D.x0 - r.left; D.offY = D.y0 - r.top;
+  const c = el.cloneNode(true);
+  c.className = 'card drag-clone'; c.style.cssText = `width:${r.width}px`;
+  c.removeAttribute('data-id');
+  doc.body.appendChild(c);
+  D.clone = c; D.dragging = true;
+  el.classList.add('ghost');
+  placeClone();
+  vib(8);
+  D.raf = requestAnimationFrame(autoScroll);
+}
+function placeClone() {
+  if (!D || !D.clone) return;
+  D.clone.style.transform = `translate3d(${D.x - D.offX}px,${D.y - D.offY}px,0) scale(1.04) rotate(-1.2deg)`;
+}
+function dragTarget() {
+  if (!D || !D.dragging) return;
+  const now = performance.now();
+  if (now - D.lastSwap < 260) return;
+  const under = doc.elementFromPoint(D.x, D.y), card = under && under.closest && under.closest('.card');
+  if (!card || card === D.el || !grid.contains(card)) return;
+  const list = visible();
+  const from = list.findIndex(i => i.id === D.id), to = list.findIndex(i => i.id === card.dataset.id);
+  if (from < 0 || to < 0 || from === to) return;
+  if (!!list[from].pinned !== !!list[to].pinned) return;          // pinned cards stay on top
+  list.splice(to, 0, list.splice(from, 1)[0]);
+  list.forEach((it, i) => { it.order = i; });
+  D.lastSwap = now;
+  vib(5);
+  render('flip');
+}
+function autoScroll() {
+  if (!D || !D.dragging) return;
+  const edge = 80, y = D.y;
+  let v = 0;
+  if (y < edge) v = -Math.ceil((edge - y) / edge * 16);
+  else if (y > innerHeight - edge) v = Math.ceil((y - (innerHeight - edge)) / edge * 16);
+  if (v) { scrollBy(0, v); dragTarget(); }
+  D.raf = requestAnimationFrame(autoScroll);
+}
+function endDrag(cancelled) {
+  if (!D) return;
+  const d = D; D = null;
+  cancelAnimationFrame(d.raf);
+  suppress = performance.now();
+  d.el.classList.remove('lift');
+  if (!d.dragging) { openActions(d.id); return; }
+  if (cancelled) render('flip');
+  save();
+  const r = d.el.getBoundingClientRect(), c = d.clone;
+  c.style.transition = 'transform .28s cubic-bezier(.2,.8,.2,1)';
+  c.style.transform = `translate3d(${r.left}px,${r.top}px,0) scale(1) rotate(0deg)`;
+  setTimeout(() => { c.remove(); d.el.classList.remove('ghost'); }, 290);
+}
+doc.addEventListener('pointermove', e => {
+  if (!D || e.pointerId !== D.pid) return;
+  D.x = e.clientX; D.y = e.clientY;
+  if (!D.dragging) { if (Math.hypot(D.x - D.x0, D.y - D.y0) > 8) beginDrag(); else return; }
+  placeClone(); dragTarget();
+});
+doc.addEventListener('pointerup', e => { if (D && e.pointerId === D.pid) endDrag(false); });
+doc.addEventListener('pointercancel', e => { if (D && e.pointerId === D.pid) endDrag(true); });
+grid.addEventListener('touchmove', e => { if (D) e.preventDefault(); }, { passive: false });
 grid.addEventListener('contextmenu', e => {
   const c = e.target.closest('.card'); if (!c) return;
   e.preventDefault();
@@ -822,7 +908,8 @@ function commit() {
   let it = E.id ? find(E.id) : null, isNew = false;
   if (it) Object.assign(it, { url, title, group, color: E.color, shape: E.shape, img });
   else {
-    it = { id: uid(), url, title, group, color: E.color, shape: E.shape, img, created: Date.now(), opens: 0, lastOpen: 0, pinned: false };
+    const minOrder = items.reduce((m, x) => Math.min(m, x.order || 0), 0);
+    it = { id: uid(), url, title, group, color: E.color, shape: E.shape, img, created: Date.now(), opens: 0, lastOpen: 0, pinned: false, order: minOrder - 1 };
     items.push(it); isNew = true;
   }
   if (img === 'idb') { imgs.set(it.id, data); DB.put(it.id, data); }
